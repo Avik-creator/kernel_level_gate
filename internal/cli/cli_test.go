@@ -127,17 +127,6 @@ func TestAllowDenyAndReset(t *testing.T) {
 	}
 }
 
-func TestInfoFdGoesBeforeTheCommand(t *testing.T) {
-	got, err := withInfoFd([]string{"bwrap", "--bind", "/work", "/work", "--", "/bin/echo", "hi"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"bwrap", "--bind", "/work", "/work", "--info-fd", "3", "--", "/bin/echo", "hi"}
-	if strings.Join(got, " ") != strings.Join(want, " ") {
-		t.Fatalf("got %q", got)
-	}
-}
-
 func setup(t *testing.T) string {
 	t.Helper()
 	t.Setenv("KGATE_CONFIG_DIR", t.TempDir())

@@ -77,10 +77,7 @@ func Prepare(cfg policy.Config, workDir, home, configDir string) (Plan, error) {
 	files = appendUnique(files, extra...)
 	allowFiles = dropSame(allowFiles, files)
 	allowDirs = dropSame(allowDirs, dirs)
-	execs, err := executables(cfg.DenyExec, work)
-	if err != nil {
-		return Plan{}, err
-	}
+	execs := executables(cfg.DenyExec, work)
 	hosts, err := normHosts(cfg.AllowNet)
 	if err != nil {
 		return Plan{}, err
@@ -222,7 +219,7 @@ func noteExposed(path string, info os.FileInfo, linked map[fileKey]struct{}, fil
 	}
 }
 
-func executables(rules []string, work string) ([]string, error) {
+func executables(rules []string, work string) []string {
 	var out []string
 	for _, rule := range rules {
 		if len(strings.Fields(rule)) != 1 {
@@ -233,7 +230,7 @@ func executables(rules []string, work string) ([]string, error) {
 		}
 		out = addBinary(out, filepath.Join(work, rule))
 	}
-	return out, nil
+	return out
 }
 
 // addBinary records a denied binary and, when that path is a symlink, its target.

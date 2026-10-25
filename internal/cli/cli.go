@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -94,35 +93,12 @@ func cmdDoctor(stdout io.Writer) (int, error) {
 }
 
 func diagnose(cfg policy.Config) (string, string, int) {
-	switch runtime.GOOS {
-	case "darwin":
-		if _, err := exec.LookPath("sandbox-exec"); err != nil {
-			return "BLOCKED", "sandbox-exec is not installed.", 1
-		}
-		switch cfg.Network {
-		case policy.NetworkRestricted:
-			return "BLOCKED", "network restricted cannot be enforced by sandbox-exec: host must be * or localhost in network address. Run kgate network off or kgate network open.", 1
-		case policy.NetworkOpen:
-			return "DEGRADED", "network open does not restrict egress.", 0
-		case policy.NetworkOff:
-			return "READY", "sandbox-exec can enforce this policy.", 0
-		default:
-			return "BLOCKED", fmt.Sprintf("%s: network %q", policy.ErrInvalid, cfg.Network), 1
-		}
-	case "linux":
-		if _, err := exec.LookPath("bwrap"); err != nil {
-			return "BLOCKED", "bwrap is not installed.", 1
-		}
-		if cfg.Network == policy.NetworkOpen {
-			return "DEGRADED", "network open does not restrict egress.", 0
-		}
-		if err := enforce.LinuxNetTools(enforce.Plan{Network: cfg.Network, AllowNet: cfg.AllowNet}); err != nil {
-			return "BLOCKED", err.Error(), 1
-		}
-		return "READY", "bwrap can enforce this policy.", 0
-	default:
-		return "BLOCKED", policy.ErrUnsupported.Error(), 1
+	box, err := enforce.ForOS(runtime.GOOS)
+	if err != nil {
+		return "BLOCKED", err.Error(), 1
 	}
+	verdict := box.Doctor(cfg.Network, cfg.AllowNet)
+	return verdict.Word, verdict.Detail, verdict.Code
 }
 
 func cmdStatus(stdout io.Writer) error {

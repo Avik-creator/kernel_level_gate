@@ -12,23 +12,33 @@ import (
 // They are applied before the home write denial so a temp root cannot reopen home.
 var writableRoots = []string{"/private/tmp", "/private/var/tmp", "/private/var/folders", "/dev"}
 
+// seatbeltHostLimit is the host filter sandbox-exec accepts.
+const seatbeltHostLimit = "sandbox-exec: host must be * or localhost in network address"
+
 // Seatbelt returns the sandbox-exec argv for plan.
 // The command is argv, never text inside the profile.
 func Seatbelt(plan Plan, command []string) ([]string, error) {
 	if len(command) == 0 {
 		return nil, fmt.Errorf("%w: command is empty", policy.ErrInvalid)
 	}
-	if !plan.Network.Valid() {
-		return nil, fmt.Errorf("%w: network %q", policy.ErrInvalid, plan.Network)
-	}
-	if plan.Network == policy.NetworkRestricted {
-		return nil, fmt.Errorf("%w: sandbox-exec: host must be * or localhost in network address", policy.ErrNetwork)
+	if err := seatbeltNetwork(plan.Network); err != nil {
+		return nil, err
 	}
 	profile, err := seatbeltProfile(plan)
 	if err != nil {
 		return nil, err
 	}
 	return append([]string{"sandbox-exec", "-p", profile, "--"}, command...), nil
+}
+
+func seatbeltNetwork(network policy.Network) error {
+	if !network.Valid() {
+		return fmt.Errorf("%w: network %q", policy.ErrInvalid, network)
+	}
+	if network == policy.NetworkRestricted {
+		return fmt.Errorf("%w: %s", policy.ErrNetwork, seatbeltHostLimit)
+	}
+	return nil
 }
 
 func seatbeltProfile(plan Plan) (string, error) {

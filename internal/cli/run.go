@@ -8,7 +8,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
@@ -72,11 +71,15 @@ func cmdRun(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, erro
 		}
 		return 1, err
 	}
-	argv, files, slirp, cleanup, err := sandbox(plan, command)
+	box, err := enforce.ForOS(runtime.GOOS)
 	if err != nil {
 		return 1, err
 	}
-	defer cleanup()
+	launch, err := box.BuildArgs(plan, command)
+	if err != nil {
+		return 1, err
+	}
+	defer launch.Close()
 	if err := audit.Write(dir, audit.Event{
 		Kind:    audit.KindLaunch,
 		Command: slices.Clone(command),
@@ -84,7 +87,7 @@ func cmdRun(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, erro
 	}); err != nil {
 		return 1, err
 	}
-	err = start(argv, files, slirp, plan.WorkDir, stdin, stdout, stderr, cfg.MaskStdout)
+	err = start(launch, plan.WorkDir, stdin, stdout, stderr, cfg.MaskStdout)
 	if ee, ok := errors.AsType[*exec.ExitError](err); ok {
 		return ee.ExitCode(), nil
 	}
@@ -94,104 +97,20 @@ func cmdRun(args []string, stdin io.Reader, stdout, stderr io.Writer) (int, erro
 	return 0, nil
 }
 
-type prepared struct {
-	argv   []string
-	files  []*os.File
-	slirp  []string
-	closer func()
-}
-
-func sandbox(plan enforce.Plan, command []string) (argv []string, files []*os.File, slirp []string, cleanup func(), err error) {
-	noop := func() {}
-	switch runtime.GOOS {
-	case "darwin":
-		argv, err = enforce.Seatbelt(plan, command)
-		return argv, nil, nil, noop, err
-	case "linux":
-		got, err := prepareLinux(plan, command)
-		if err != nil {
-			return nil, nil, nil, noop, err
-		}
-		return got.argv, got.files, got.slirp, got.closer, nil
-	default:
-		return nil, nil, nil, noop, policy.ErrUnsupported
-	}
-}
-
-func prepareLinux(plan enforce.Plan, command []string) (prepared, error) {
-	if err := enforce.LinuxNetTools(plan); err != nil {
-		return prepared{}, err
-	}
-	dir, err := os.MkdirTemp("", "kgate-")
-	if err != nil {
-		return prepared{}, err
-	}
-	closer := func() { os.RemoveAll(dir) }
-	scriptPath := filepath.Join(dir, "net.sh")
-	resolvPath := filepath.Join(dir, "resolv.conf")
-	lin, err := enforce.Bubblewrap(plan, scriptPath, resolvPath, command)
-	if err != nil {
-		closer()
-		return prepared{}, err
-	}
-	out := prepared{argv: lin.Argv, slirp: lin.Slirp, closer: closer}
-	if lin.Script == "" {
-		return out, nil
-	}
-	if err := os.WriteFile(scriptPath, []byte(lin.Script), 0o700); err != nil {
-		closer()
-		return prepared{}, err
-	}
-	if err := os.WriteFile(resolvPath, []byte(lin.Resolv), 0o600); err != nil {
-		closer()
-		return prepared{}, err
-	}
-	argv, err := withInfoFd(lin.Argv)
-	if err != nil {
-		closer()
-		return prepared{}, err
-	}
-	reader, writer, err := os.Pipe()
-	if err != nil {
-		closer()
-		return prepared{}, err
-	}
-	out.argv = argv
-	out.slirp = lin.Slirp
-	out.files = []*os.File{writer, reader}
-	out.closer = func() {
-		reader.Close()
-		writer.Close()
-		closer()
-	}
-	return out, nil
-}
-
-// withInfoFd asks bwrap to report the sandboxed pid on fd 3.
-func withInfoFd(argv []string) ([]string, error) {
-	at := slices.Index(argv, "--")
-	if at < 0 {
-		return nil, fmt.Errorf("%w: sandbox command is missing", policy.ErrInvalid)
-	}
-	out := slices.Clone(argv[:at])
-	out = append(out, "--info-fd", "3")
-	return append(out, argv[at:]...), nil
-}
-
-func start(argv []string, files []*os.File, slirp []string, work string, stdin io.Reader, stdout, stderr io.Writer, rules policy.MaskStdout) error {
-	cmd := exec.Command(argv[0], argv[1:]...)
+func start(launch enforce.Launch, work string, stdin io.Reader, stdout, stderr io.Writer, rules policy.MaskStdout) error {
+	cmd := exec.Command(launch.Argv[0], launch.Argv[1:]...)
 	cmd.Dir = work
 	var info *os.File
-	if len(files) == 2 {
-		cmd.ExtraFiles = []*os.File{files[0]}
-		info = files[1]
-		defer files[0].Close()
+	if len(launch.Files) == 2 {
+		cmd.ExtraFiles = []*os.File{launch.Files[0]}
+		info = launch.Files[1]
+		defer launch.Files[0].Close()
 	}
 	masking := len(rules.Presets) > 0 || len(rules.Patterns) > 0
 	if terminal(stdin) && terminal(stdout) {
-		return runTerminal(cmd, info, slirp, stdin.(*os.File), stdout, rules, masking)
+		return runTerminal(cmd, info, launch.Slirp, stdin.(*os.File), stdout, rules, masking)
 	}
-	return runPipes(cmd, info, slirp, stdin, stdout, stderr, rules, masking)
+	return runPipes(cmd, info, launch.Slirp, stdin, stdout, stderr, rules, masking)
 }
 
 func runPipes(cmd *exec.Cmd, info *os.File, slirp []string, stdin io.Reader, stdout, stderr io.Writer, rules policy.MaskStdout, masking bool) error {
@@ -216,15 +135,11 @@ func runPipes(cmd *exec.Cmd, info *os.File, slirp []string, stdin io.Reader, std
 	}
 	proc, err := attachSlirp(info, slirp)
 	if err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		stop(cmd)
 		return err
 	}
 	err = cmd.Wait()
-	if proc != nil {
-		_ = proc.Process.Kill()
-		_ = proc.Wait()
-	}
+	stop(proc)
 	for _, one := range flushers {
 		if ferr := one.Flush(); err == nil {
 			err = ferr
@@ -244,8 +159,7 @@ func runTerminal(cmd *exec.Cmd, info *os.File, slirp []string, stdin *os.File, s
 	}
 	proc, err := attachSlirp(info, slirp)
 	if err != nil {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+		stop(cmd)
 		return err
 	}
 	dst := stdout
@@ -253,8 +167,8 @@ func runTerminal(cmd *exec.Cmd, info *os.File, slirp []string, stdin *os.File, s
 	if masking {
 		writer, err := mask.NewWriter(stdout, rules)
 		if err != nil {
-			_ = cmd.Process.Kill()
-			_ = cmd.Wait()
+			stop(cmd)
+			stop(proc)
 			return err
 		}
 		dst = writer
@@ -263,10 +177,7 @@ func runTerminal(cmd *exec.Cmd, info *os.File, slirp []string, stdin *os.File, s
 	go io.Copy(ptmx, stdin)
 	_, copyErr := io.Copy(dst, ptmx)
 	waitErr := cmd.Wait()
-	if proc != nil {
-		_ = proc.Process.Kill()
-		_ = proc.Wait()
-	}
+	stop(proc)
 	if flush != nil {
 		if ferr := flush.Flush(); waitErr == nil {
 			waitErr = ferr
@@ -299,6 +210,14 @@ func attachSlirp(info *os.File, args []string) (*exec.Cmd, error) {
 		return nil, err
 	}
 	return slirp, nil
+}
+
+func stop(proc *exec.Cmd) {
+	if proc == nil || proc.Process == nil {
+		return
+	}
+	_ = proc.Process.Kill()
+	_ = proc.Wait()
 }
 
 func terminal(stream any) bool {
