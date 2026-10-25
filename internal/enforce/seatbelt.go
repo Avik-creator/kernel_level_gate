@@ -78,7 +78,8 @@ func seatbeltProfile(plan Plan) (string, error) {
 		return "", err
 	}
 	if plan.Network == policy.NetworkOff {
-		b.WriteString("(deny network-outbound)\n(allow network-outbound (local ip))\n")
+		// (local ip) also matches a public address on this OS.
+		b.WriteString("(deny network-outbound)\n(allow network-outbound (remote ip \"localhost:*\"))\n")
 	}
 	return b.String(), nil
 }

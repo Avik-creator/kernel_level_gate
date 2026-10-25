@@ -54,7 +54,7 @@ func TestSeatbeltProfileOrder(t *testing.T) {
 		`(deny file-read* file-write* (subpath "/Users/me/.kgate"))`,
 		`(deny process-exec (literal "/usr/bin/curl"))`,
 		"(deny network-outbound)",
-		"(allow network-outbound (local ip))",
+		`(allow network-outbound (remote ip "localhost:*"))`,
 	} {
 		at := strings.Index(profile, rule)
 		if at < prev {
@@ -126,6 +126,44 @@ func TestSeatbeltRunsOnThisMac(t *testing.T) {
 	outside := filepath.Join(plan.Home, "nope")
 	if _, err := runSeatbelt(plan, "/usr/bin/touch", outside); err == nil {
 		t.Fatal("home file was writable")
+	}
+}
+
+func TestSeatbeltOffAllowsLocalhostOnly(t *testing.T) {
+	if _, err := exec.LookPath("sandbox-exec"); err != nil {
+		t.Skip(err)
+	}
+	home := t.TempDir()
+	work := filepath.Join(home, "proj")
+	if err := os.Mkdir(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := Prepare(policy.Config{Network: policy.NetworkOff}, work, home, filepath.Join(home, ".kgate"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `import socket
+def hit(addr, port):
+    s = socket.socket()
+    s.settimeout(3)
+    try:
+        s.connect((addr, port))
+        print(addr, "connected")
+    except Exception as e:
+        print(addr, type(e).__name__)
+hit("127.0.0.1", 9)
+hit("142.250.134.139", 443)
+`
+	out, err := runSeatbelt(plan, "/usr/bin/python3", "-c", script)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	text := string(out)
+	if !strings.Contains(text, "127.0.0.1 ConnectionRefusedError") {
+		t.Fatalf("localhost was not allowed: %s", text)
+	}
+	if !strings.Contains(text, "142.250.134.139 PermissionError") {
+		t.Fatalf("public address was reachable: %s", text)
 	}
 }
 
