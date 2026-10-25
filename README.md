@@ -2,9 +2,9 @@
 
 Kernel-enforced sandbox for AI coding agents. The process runs under macOS Seatbelt or Linux bubblewrap, so file and network limits are applied by the operating system.
 
-The module path is `kernel_level_gate`. The command will be `kgate`.
+The module path is `kernel_level_gate`. The command is `kgate`.
 
-This repository is private. The gate itself is not in the tree yet: `go.mod` names the module, and this file is the contract for the build.
+https://github.com/user-attachments/assets/fed1c9f9-8ec7-4e4a-8a52-5cad1f36bb30
 
 ## Policy
 
